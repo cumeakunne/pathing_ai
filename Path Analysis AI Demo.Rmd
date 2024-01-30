@@ -1,0 +1,149 @@
+---
+title: "Path Analysis AI Demo"
+output: 
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    css: styles.css
+params:
+  pid: "[ADD PROPERTY ID HERE]"
+  mid: "[ADD MEASUREMENT ID HERE]"
+  base_cats: 
+  google_account: "[ADD GOOGLE ACCOUNT HERE]"
+---
+
+Primary Goal: Build an AI LLM model solution which can ingest pre-processed data (structured data schema) and a path analysis query user prompt, and return a tokenized text response or report
+
+Obj 1: Demo proof of concept with Example Case
+- Example Query: Can we ID and rank the page paths users take on their site journey which result in a conversion within a single session? And what proportion each converting paths makes of total? 
+
+Obj 2: Build AI model pipeline that can receive this expected data structure
+
+Obj 3: Solution data processing to work on multiple data sources (Any site path data)
+
+
+```{r setup, include = FALSE, warning = FALSE, message = FALSE}
+# Check for packages needed and then load the packages
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyverse,
+               googleAnalyticsR,
+               googlesheets4,
+               scales,
+               htmltools,  # Adding logo
+               knitr,
+               kableExtra,
+               sditools)
+
+# Set your GA4 property variables
+pid <- params$pid 
+mid <- params$mid
+```
+
+
+```{r Authenticate}
+# Authenticate Google account
+googleAnalyticsR::ga_auth(email = params$google_account)
+```
+
+
+```{r get_data}
+
+# Get lists of all variables
+df_variables <- ga_meta(propertyId = pid, version = 'data')
+
+# Configure data pull: Use list to update below to select applicable variables and filters
+pull_metrics <- c("customEvent:count_form_submission_successes")
+pull_dimensions <- c("dateHourMinute","customUser:SESSIONID","customUser:GACLIENTID", "sessionSource", "sessionMedium", "pagePath", "landingPage", "customEvent:type")
+pull_filters <- ga_data_filter(!("customUser:GACLIENTID" == "(not set)"))
+date_range <- c("2023-11-1", "2024-1-29")
+
+# Get data: Use variable list to select data for path analysis where conversion = form submission
+df_event <- ga_data(
+  pid,
+  metrics = pull_metrics,
+  dimensions = pull_dimensions,
+  dim_filters = pull_filters,
+  date_range = date_range,
+  limit = 1000
+)
+
+```
+
+```{r process data: create session_id and sort}
+# Create a data frame with the inputs
+data <- df_event %>%
+  mutate(session_id = paste(`customUser:GACLIENTID`,`customUser:SESSIONID`, sep ="."))
+
+sort_data <- data %>% 
+  arrange(session_id, dateHourMinute)
+
+```
+
+
+```{r process data: sequence path}
+# Initialize a new column to store the sequence of page paths, current session id, and current sequence
+seq_data <- sort_data
+seq_data$sequence <- NULL
+current_session_id <- 0
+current_sequence <- NULL
+
+# Iterate through each session_id and fill in the sequence based on the page paths
+
+for (i in 1:nrow(seq_data)) {
+  if (seq_data$session_id[i] != current_session_id) {
+    current_session_id <- seq_data$session_id[i]
+    current_sequence <- seq_data$pagePath[i]
+  } else {
+    current_sequence <- paste(current_sequence, seq_data$pagePath[i], sep = " > ")
+  }
+  seq_data$sequence[i] <- current_sequence
+}
+
+# View the updated data frame with the sequence column
+print(seq_data)
+```
+
+```{r process data: tag conversions}
+# For Objective 1 Example Query: id sessions that result in conversion
+converters <- data %>%
+  filter(`customEvent:count_form_submission_successes` > 0, `customEvent:type` == "Gated Resource Form") %>%
+  distinct(`session_id`) %>%
+  pull()
+
+tag_data <- seq_data %>% 
+  filter(session_id %in% converters)
+
+
+ converters <- data %>%
+  filter(`customEvent:count_form_submission_successes` > 0) %>%
+  distinct(`session_id`) %>%
+  pull()
+```
+
+
+```{r compute path query measures and report}
+# Filter only the sessions where conversion = TRUE
+converted_sessions <- tag_data
+
+# Filter only the complete path
+converted_full_paths <- converted_sessions %>%
+  group_by(session_id) %>%
+  filter(sequence == max(sequence))
+  
+# Count the frequency of each sequence of page paths
+sequence_counts <- table(converted_full_paths$sequence)
+
+# Sort the sequences by count in descending order
+sorted_sequences <- sort(sequence_counts, decreasing = TRUE)
+
+# Report: Rank and proportion score of converting paths
+rank_df <- data.frame(sorted_sequences)
+path_report <- rank_df %>%
+  mutate(rank = row_number(rank_df)) %>%
+  mutate(conversionPath = Var1) %>%
+  mutate(freq = Freq) %>% 
+  mutate(prop = prop.table(sorted_sequences)) %>% 
+  mutate(score = round(prop * 100)) %>% 
+  select(rank, conversionPath, freq, prop, score)
+```
